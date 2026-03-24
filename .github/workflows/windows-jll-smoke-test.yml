@@ -101,10 +101,13 @@ jobs:
           $overrideDir = Join-Path $env:GITHUB_WORKSPACE ".julia\artifacts"
           New-Item -ItemType Directory -Force -Path $overrideDir | Out-Null
           $prefix = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE "prefix")).Path -replace '\\', '/'
-          @"
-[2058adf7-7bf0-520c-9955-5a68511dd633]
-gametracer = "$prefix"
-"@ | Set-Content (Join-Path $overrideDir "Overrides.toml")
+
+          $content = @"
+          [2058adf7-7bf0-520c-9955-5a68511dd633]
+          gametracer = "$prefix"
+          "@
+
+          $content | Set-Content (Join-Path $overrideDir "Overrides.toml")
           Get-Content (Join-Path $overrideDir "Overrides.toml")
 
       - name: Instantiate GameTracer.jl
