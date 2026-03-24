@@ -1,0 +1,123 @@
+name: windows-jll-smoke-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      gametracer_repo:
+        description: 'Repo to test against (owner/name)'
+        required: true
+        default: 'mnshkw/GameTracer.jl'
+        type: string
+      gametracer_ref:
+        description: 'Branch, tag, or commit SHA to test'
+        required: true
+        default: 'main'
+        type: string
+      julia_version:
+        description: 'Julia version for the Windows job'
+        required: true
+        default: '1.10'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build_windows_tarball:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout scratch repo
+        uses: actions/checkout@v5
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+
+      - name: Show Docker version
+        run: docker version
+
+      - name: Install BinaryBuilder
+        run: julia --project=@temp -e 'using Pkg; Pkg.add("BinaryBuilder")'
+
+      - name: Build x86_64-w64-mingw32 tarball
+        working-directory: builder
+        run: julia --project=@temp --color=yes build_tarballs.jl --verbose x86_64-w64-mingw32
+
+      - name: List generated products
+        working-directory: builder
+        run: ls -lah products
+
+      - name: Upload Windows tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: gametracer-windows-tarball
+          path: builder/products/*x86_64-w64-mingw32*.tar.gz
+          retention-days: 3
+
+  test_on_windows:
+    needs: build_windows_tarball
+    runs-on: windows-latest
+    steps:
+      - name: Check out GameTracer.jl
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.gametracer_repo }}
+          ref: ${{ inputs.gametracer_ref }}
+          path: GameTracer.jl
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ inputs.julia_version }}
+
+      - name: Download patched tarball
+        uses: actions/download-artifact@v5
+        with:
+          name: gametracer-windows-tarball
+          path: artifacts
+
+      - name: Create isolated Julia depot
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\.julia" | Out-Null
+          "JULIA_DEPOT_PATH=$env:GITHUB_WORKSPACE\.julia;" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Extract tarball to prefix
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\prefix" | Out-Null
+          $tarball = Get-ChildItem "$env:GITHUB_WORKSPACE\artifacts\*.tar.gz" | Select-Object -First 1
+          tar -xzf $tarball.FullName -C "$env:GITHUB_WORKSPACE\prefix"
+
+      - name: Show extracted files
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse "$env:GITHUB_WORKSPACE\prefix" | Select-Object FullName
+
+      - name: Write Overrides.toml
+        shell: pwsh
+        run: |
+          $overrideDir = Join-Path $env:GITHUB_WORKSPACE ".julia\artifacts"
+          New-Item -ItemType Directory -Force -Path $overrideDir | Out-Null
+          $prefix = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE "prefix")).Path -replace '\\', '/'
+          @"
+[2058adf7-7bf0-520c-9955-5a68511dd633]
+gametracer = "$prefix"
+"@ | Set-Content (Join-Path $overrideDir "Overrides.toml")
+          Get-Content (Join-Path $overrideDir "Overrides.toml")
+
+      - name: Instantiate GameTracer.jl
+        working-directory: GameTracer.jl
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+
+      - name: Smoke test patched DLL directly
+        run: julia -e 'using Libdl; dll = joinpath(ENV["GITHUB_WORKSPACE"], "prefix", "bin", "libgametracer.dll"); println("DLL = ", dll); h = Libdl.dlopen(dll); println("Direct dlopen ok: ", h !== nothing)'
+
+      - name: Smoke test package load
+        working-directory: GameTracer.jl
+        run: julia --project=. -e 'using GameTracer; println("using GameTracer ok")'
+
+      - name: Run GameTracer.jl tests
+        working-directory: GameTracer.jl
+        run: julia --project=. -e 'using Pkg; Pkg.test()'
