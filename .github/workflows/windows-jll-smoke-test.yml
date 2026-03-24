@@ -160,6 +160,20 @@ jobs:
           tar -xzf $tarball -C $overrideDir
           Get-ChildItem -Recurse $overrideDir | Select-Object FullName
 
+      - name: Patch local JLL Artifacts.toml for this Windows runner
+        shell: pwsh
+        run: |
+          $artifactsToml = Join-Path $env:GITHUB_WORKSPACE "localdev\gametracer_jll\Artifacts.toml"
+          $tarball = Join-Path $env:GITHUB_WORKSPACE "artifacts\$env:BINARY_ARCHIVE_NAME"
+          if (-not (Test-Path $artifactsToml)) { throw "Artifacts.toml not found at $artifactsToml" }
+          if (-not (Test-Path $tarball)) { throw "Binary tarball not found at $tarball" }
+
+          $tarballUri = "file:///" + ((Resolve-Path $tarball).Path -replace '\\', '/')
+
+          julia -e 'using TOML; path = ARGS[1]; local_uri = ARGS[2]; data = TOML.parsefile(path); found = false; for entry in data["gametracer"]; if get(entry, "arch", nothing) == "x86_64" && get(entry, "os", nothing) == "windows"; if haskey(entry, "download"); for dl in entry["download"]; dl["url"] = local_uri; end; found = true; end; end; end; found || error("Did not find x86_64/windows artifact entry in Artifacts.toml"); open(path, "w") do io; TOML.print(io, data); end' $artifactsToml $tarballUri
+
+          Get-Content $artifactsToml
+
       - name: Develop local gametracer_jll into GameTracer environment
         working-directory: GameTracer.jl
         run: |
