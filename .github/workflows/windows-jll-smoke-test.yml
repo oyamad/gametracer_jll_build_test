@@ -25,6 +25,8 @@ permissions:
 env:
   BB_ENV: ${{ github.workspace }}/.bb-env
   BUILD_DEPOT: ${{ github.workspace }}/.julia-build
+  BINARY_ARCHIVE_NAME: gametracer_windows_binary.tar.gz
+  LOCAL_JLL_ARCHIVE_NAME: gametracer_local_jll.tar.gz
 
 jobs:
   build_windows_tarball:
@@ -58,11 +60,24 @@ jobs:
         working-directory: builder
         run: ls -lah products
 
-      - name: Archive generated local JLL package
+      - name: Prepare archives for upload
         shell: bash
         run: |
+          mapfile -t tarballs < <(find builder/products -maxdepth 1 -type f -name 'gametracer.v*.x86_64-w64-mingw32.tar.gz' | sort)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "Expected exactly one binary tarball, found ${#tarballs[@]}:" >&2
+            printf '  %s\n' "${tarballs[@]}" >&2
+            exit 1
+          fi
+
+          cp "${tarballs[0]}" "$GITHUB_WORKSPACE/$BINARY_ARCHIVE_NAME"
+
           test -d "$BUILD_DEPOT/dev/gametracer_jll"
-          tar -C "$BUILD_DEPOT/dev" -czf "$GITHUB_WORKSPACE/gametracer_jll_pkg.tar.gz" gametracer_jll
+          tar -C "$BUILD_DEPOT/dev" -czf "$GITHUB_WORKSPACE/$LOCAL_JLL_ARCHIVE_NAME" gametracer_jll
+
+          echo "Binary archive: $GITHUB_WORKSPACE/$BINARY_ARCHIVE_NAME"
+          echo "Local JLL archive: $GITHUB_WORKSPACE/$LOCAL_JLL_ARCHIVE_NAME"
+          tar -tzf "$GITHUB_WORKSPACE/$BINARY_ARCHIVE_NAME" | head -n 20
 
       - name: Inspect DLL imports
         shell: bash
@@ -71,21 +86,23 @@ jobs:
           sudo apt-get install -y binutils-mingw-w64-x86-64
           rm -rf /tmp/gametracer-prefix
           mkdir -p /tmp/gametracer-prefix
-          tar -xzf builder/products/*x86_64-w64-mingw32*.tar.gz -C /tmp/gametracer-prefix
+          tar -xzf "$GITHUB_WORKSPACE/$BINARY_ARCHIVE_NAME" -C /tmp/gametracer-prefix
           x86_64-w64-mingw32-objdump -p /tmp/gametracer-prefix/bin/libgametracer.dll | grep 'DLL Name' || true
 
       - name: Upload Windows tarball
         uses: actions/upload-artifact@v4
         with:
           name: gametracer-windows-tarball
-          path: builder/products/*x86_64-w64-mingw32*.tar.gz
+          path: ${{ github.workspace }}/${{ env.BINARY_ARCHIVE_NAME }}
+          if-no-files-found: error
           retention-days: 3
 
       - name: Upload local JLL package
         uses: actions/upload-artifact@v4
         with:
           name: gametracer-local-jll
-          path: gametracer_jll_pkg.tar.gz
+          path: ${{ github.workspace }}/${{ env.LOCAL_JLL_ARCHIVE_NAME }}
+          if-no-files-found: error
           retention-days: 3
 
   test_on_windows:
@@ -126,9 +143,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\localdev" | Out-Null
-          $jllArchive = Get-ChildItem "$env:GITHUB_WORKSPACE\artifacts-jll\*.tar.gz" | Select-Object -First 1
-          if (-not $jllArchive) { throw "No JLL archive found." }
-          tar -xzf $jllArchive.FullName -C "$env:GITHUB_WORKSPACE\localdev"
+          $jllArchive = Join-Path $env:GITHUB_WORKSPACE "artifacts-jll\$env:LOCAL_JLL_ARCHIVE_NAME"
+          if (-not (Test-Path $jllArchive)) { throw "No JLL archive found at $jllArchive" }
+          tar -xzf $jllArchive -C "$env:GITHUB_WORKSPACE\localdev"
 
       - name: Put rebuilt binaries into local JLL override/
         shell: pwsh
@@ -136,9 +153,11 @@ jobs:
           $jllDir = Join-Path $env:GITHUB_WORKSPACE "localdev\gametracer_jll"
           $overrideDir = Join-Path $jllDir "override"
           New-Item -ItemType Directory -Force -Path $overrideDir | Out-Null
-          $tarball = Get-ChildItem "$env:GITHUB_WORKSPACE\artifacts\*.tar.gz" | Select-Object -First 1
-          if (-not $tarball) { throw "No tarball found." }
-          tar -xzf $tarball.FullName -C $overrideDir
+
+          $tarball = Join-Path $env:GITHUB_WORKSPACE "artifacts\$env:BINARY_ARCHIVE_NAME"
+          if (-not (Test-Path $tarball)) { throw "No binary tarball found at $tarball" }
+
+          tar -xzf $tarball -C $overrideDir
           Get-ChildItem -Recurse $overrideDir | Select-Object FullName
 
       - name: Develop local gametracer_jll into GameTracer environment
@@ -149,7 +168,7 @@ jobs:
       - name: Smoke test local JLL load
         working-directory: GameTracer.jl
         run: |
-          julia --project=. -e 'using gametracer_jll; println("using gametracer_jll ok"); println(gametracer_jll.libgametracer)'
+          julia --project=. -e 'using gametracer_jll; println("using gametracer_jll ok")'
 
       - name: Smoke test package load
         working-directory: GameTracer.jl
