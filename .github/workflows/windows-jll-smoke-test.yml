@@ -160,7 +160,7 @@ jobs:
           tar -xzf $tarball -C $overrideDir
           Get-ChildItem -Recurse $overrideDir | Select-Object FullName
 
-- name: Patch local JLL Artifacts.toml for this Windows runner
+      - name: Patch local JLL Artifacts.toml for this Windows runner
         shell: pwsh
         run: |
           $artifactsToml = Join-Path $env:GITHUB_WORKSPACE "localdev\gametracer_jll\Artifacts.toml"
@@ -171,7 +171,7 @@ jobs:
 
           $tarballUri = "file:///" + ((Resolve-Path $tarball).Path -replace '\\', '/')
 
-          julia -e '
+          $script = @'
           using TOML
           function patch(path, local_uri)
               data = TOML.parsefile(path)
@@ -192,7 +192,12 @@ jobs:
               end
           end
           patch(ARGS[1], ARGS[2])
-          ' $artifactsToml $tarballUri
+          '@
+
+          $scriptPath = Join-Path $env:RUNNER_TEMP "patch_artifacts.jl"
+          Set-Content -Path $scriptPath -Value $script
+
+          julia $scriptPath $artifactsToml $tarballUri
 
           Get-Content $artifactsToml
 
