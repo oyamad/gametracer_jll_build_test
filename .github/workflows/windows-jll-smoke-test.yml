@@ -115,7 +115,8 @@ jobs:
         run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
       - name: Smoke test patched DLL directly
-        run: julia -e 'using Libdl; dll = joinpath(ENV["GITHUB_WORKSPACE"], "prefix", "bin", "libgametracer.dll"); println("DLL = ", dll); h = Libdl.dlopen(dll); println("Direct dlopen ok: ", h !== nothing)'
+        run: >-
+          julia -e 'using Libdl; dll = joinpath(ENV["GITHUB_WORKSPACE"], "prefix", "bin", "libgametracer.dll"); println("DLL = ", dll); h = Libdl.dlopen(dll); println("Direct dlopen ok: ", h !== nothing)'
 
       - name: Smoke test package load
         working-directory: GameTracer.jl
