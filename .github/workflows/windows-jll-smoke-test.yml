@@ -24,6 +24,7 @@ permissions:
 
 env:
   BB_ENV: ${{ github.workspace }}/.bb-env
+  BUILD_DEPOT: ${{ github.workspace }}/.julia-build
 
 jobs:
   build_windows_tarball:
@@ -43,25 +44,48 @@ jobs:
       - name: Install BinaryBuilder into persistent env
         shell: bash
         run: |
-          mkdir -p "$BB_ENV"
-          julia --project="$BB_ENV" -e 'using Pkg; Pkg.add("BinaryBuilder")'
+          mkdir -p "$BB_ENV" "$BUILD_DEPOT"
+          JULIA_DEPOT_PATH="$BUILD_DEPOT" julia --project="$BB_ENV" -e 'using Pkg; Pkg.add("BinaryBuilder")'
 
-      - name: Build x86_64-w64-mingw32 tarball
+      - name: Build x86_64-w64-mingw32 tarball and local JLL
         shell: bash
         working-directory: builder
         run: |
-          julia --project="$BB_ENV" --color=yes build_tarballs.jl --verbose x86_64-w64-mingw32
+          JULIA_DEPOT_PATH="$BUILD_DEPOT" julia --project="$BB_ENV" --color=yes build_tarballs.jl --verbose --deploy=local x86_64-w64-mingw32
 
       - name: List generated products
         shell: bash
         working-directory: builder
         run: ls -lah products
 
+      - name: Archive generated local JLL package
+        shell: bash
+        run: |
+          test -d "$BUILD_DEPOT/dev/gametracer_jll"
+          tar -C "$BUILD_DEPOT/dev" -czf "$GITHUB_WORKSPACE/gametracer_jll_pkg.tar.gz" gametracer_jll
+
+      - name: Inspect DLL imports
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils-mingw-w64-x86-64
+          rm -rf /tmp/gametracer-prefix
+          mkdir -p /tmp/gametracer-prefix
+          tar -xzf builder/products/*x86_64-w64-mingw32*.tar.gz -C /tmp/gametracer-prefix
+          x86_64-w64-mingw32-objdump -p /tmp/gametracer-prefix/bin/libgametracer.dll | grep 'DLL Name' || true
+
       - name: Upload Windows tarball
         uses: actions/upload-artifact@v4
         with:
           name: gametracer-windows-tarball
           path: builder/products/*x86_64-w64-mingw32*.tar.gz
+          retention-days: 3
+
+      - name: Upload local JLL package
+        uses: actions/upload-artifact@v4
+        with:
+          name: gametracer-local-jll
+          path: gametracer_jll_pkg.tar.gz
           retention-days: 3
 
   test_on_windows:
@@ -80,53 +104,52 @@ jobs:
         with:
           version: ${{ inputs.julia_version }}
 
-      - name: Download patched tarball
-        uses: actions/download-artifact@v5
-        with:
-          name: gametracer-windows-tarball
-          path: artifacts
-
       - name: Create isolated Julia depot
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\.julia" | Out-Null
           "JULIA_DEPOT_PATH=$env:GITHUB_WORKSPACE\.julia;" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Extract tarball to prefix
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\prefix" | Out-Null
-          $tarball = Get-ChildItem "$env:GITHUB_WORKSPACE\artifacts\*.tar.gz" | Select-Object -First 1
-          if (-not $tarball) { throw "No tarball found in artifacts directory." }
-          tar -xzf $tarball.FullName -C "$env:GITHUB_WORKSPACE\prefix"
+      - name: Download patched tarball
+        uses: actions/download-artifact@v5
+        with:
+          name: gametracer-windows-tarball
+          path: artifacts
 
-      - name: Show extracted files
-        shell: pwsh
-        run: |
-          Get-ChildItem -Recurse "$env:GITHUB_WORKSPACE\prefix" | Select-Object FullName
+      - name: Download local JLL package
+        uses: actions/download-artifact@v5
+        with:
+          name: gametracer-local-jll
+          path: artifacts-jll
 
-      - name: Write Overrides.toml
+      - name: Unpack local JLL package
         shell: pwsh
         run: |
-          $overrideDir = Join-Path $env:GITHUB_WORKSPACE ".julia\artifacts"
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\localdev" | Out-Null
+          $jllArchive = Get-ChildItem "$env:GITHUB_WORKSPACE\artifacts-jll\*.tar.gz" | Select-Object -First 1
+          if (-not $jllArchive) { throw "No JLL archive found." }
+          tar -xzf $jllArchive.FullName -C "$env:GITHUB_WORKSPACE\localdev"
+
+      - name: Put rebuilt binaries into local JLL override/
+        shell: pwsh
+        run: |
+          $jllDir = Join-Path $env:GITHUB_WORKSPACE "localdev\gametracer_jll"
+          $overrideDir = Join-Path $jllDir "override"
           New-Item -ItemType Directory -Force -Path $overrideDir | Out-Null
-          $prefix = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE "prefix")).Path -replace '\\', '/'
+          $tarball = Get-ChildItem "$env:GITHUB_WORKSPACE\artifacts\*.tar.gz" | Select-Object -First 1
+          if (-not $tarball) { throw "No tarball found." }
+          tar -xzf $tarball.FullName -C $overrideDir
+          Get-ChildItem -Recurse $overrideDir | Select-Object FullName
 
-          @(
-            '[2058adf7-7bf0-520c-9955-5a68511dd633]'
-            "gametracer = `"$prefix`""
-          ) | Set-Content (Join-Path $overrideDir "Overrides.toml")
-
-          Get-Content (Join-Path $overrideDir "Overrides.toml")
-
-      - name: Instantiate GameTracer.jl
+      - name: Develop local gametracer_jll into GameTracer environment
         working-directory: GameTracer.jl
         run: |
-          julia --project=. -e 'using Pkg; Pkg.instantiate()'
+          julia --project=. -e 'using Pkg; Pkg.develop(path=joinpath(ENV["GITHUB_WORKSPACE"], "localdev", "gametracer_jll")); Pkg.resolve(); Pkg.instantiate()'
 
-      - name: Smoke test patched DLL directly
+      - name: Smoke test local JLL load
+        working-directory: GameTracer.jl
         run: |
-          julia -e 'using Libdl; dll = joinpath(ENV["GITHUB_WORKSPACE"], "prefix", "bin", "libgametracer.dll"); println("DLL = ", dll); h = Libdl.dlopen(dll); println("Direct dlopen ok = ", h !== nothing)'
+          julia --project=. -e 'using gametracer_jll; println("using gametracer_jll ok"); println(gametracer_jll.libgametracer)'
 
       - name: Smoke test package load
         working-directory: GameTracer.jl

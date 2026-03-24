@@ -1,4 +1,5 @@
 using BinaryBuilder
+using Pkg: PackageSpec
 
 name = "gametracer"
 version = v"0.2.1"
@@ -28,11 +29,20 @@ cmake --install build
 """
 
 platforms = supported_platforms()
+windows_platforms = filter(Sys.iswindows, platforms)
 
 products = [
     LibraryProduct("libgametracer", :libgametracer),
 ]
 
-dependencies = Dependency[]
+dependencies = [
+    Dependency(
+        PackageSpec(
+            name = "CompilerSupportLibraries_jll",
+            uuid = "e66e0078-7015-5450-92f7-15fbd957f2ae",
+        );
+        platforms = windows_platforms,
+    ),
+]
 
-build_tarballs(ARGS, name, version, sources, script, platforms, products, dependencies; julia_compat="1.6")
+build_tarballs(ARGS, name, version, sources, script, platforms, products, dependencies; julia_compat = "1.6")
