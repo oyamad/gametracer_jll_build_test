@@ -4,23 +4,26 @@ on:
   workflow_dispatch:
     inputs:
       gametracer_repo:
-        description: 'Repo to test against (owner/name)'
+        description: "Repo to test against (owner/name)"
         required: true
-        default: 'mnshkw/GameTracer.jl'
+        default: "mnshkw/GameTracer.jl"
         type: string
       gametracer_ref:
-        description: 'Branch, tag, or commit SHA to test'
+        description: "Branch, tag, or commit SHA to test"
         required: true
-        default: 'main'
+        default: "main"
         type: string
       julia_version:
-        description: 'Julia version for the Windows job'
+        description: "Julia version for the Windows job"
         required: true
-        default: '1.10'
+        default: "1.10"
         type: string
 
 permissions:
   contents: read
+
+env:
+  BB_ENV: ${{ github.workspace }}/.bb-env
 
 jobs:
   build_windows_tarball:
@@ -32,19 +35,25 @@ jobs:
       - name: Set up Julia
         uses: julia-actions/setup-julia@v2
         with:
-          version: '1'
+          version: "1"
 
       - name: Show Docker version
         run: docker version
 
-      - name: Install BinaryBuilder
-        run: julia --project=@temp -e 'using Pkg; Pkg.add("BinaryBuilder")'
+      - name: Install BinaryBuilder into persistent env
+        shell: bash
+        run: |
+          mkdir -p "$BB_ENV"
+          julia --project="$BB_ENV" -e 'using Pkg; Pkg.add("BinaryBuilder")'
 
       - name: Build x86_64-w64-mingw32 tarball
+        shell: bash
         working-directory: builder
-        run: julia --project=@temp --color=yes build_tarballs.jl --verbose x86_64-w64-mingw32
+        run: |
+          julia --project="$BB_ENV" --color=yes build_tarballs.jl --verbose x86_64-w64-mingw32
 
       - name: List generated products
+        shell: bash
         working-directory: builder
         run: ls -lah products
 
@@ -88,6 +97,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\prefix" | Out-Null
           $tarball = Get-ChildItem "$env:GITHUB_WORKSPACE\artifacts\*.tar.gz" | Select-Object -First 1
+          if (-not $tarball) { throw "No tarball found in artifacts directory." }
           tar -xzf $tarball.FullName -C "$env:GITHUB_WORKSPACE\prefix"
 
       - name: Show extracted files
@@ -102,26 +112,28 @@ jobs:
           New-Item -ItemType Directory -Force -Path $overrideDir | Out-Null
           $prefix = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE "prefix")).Path -replace '\\', '/'
 
-          $content = @"
-          [2058adf7-7bf0-520c-9955-5a68511dd633]
-          gametracer = "$prefix"
-          "@
+          @(
+            '[2058adf7-7bf0-520c-9955-5a68511dd633]'
+            "gametracer = `"$prefix`""
+          ) | Set-Content (Join-Path $overrideDir "Overrides.toml")
 
-          $content | Set-Content (Join-Path $overrideDir "Overrides.toml")
           Get-Content (Join-Path $overrideDir "Overrides.toml")
 
       - name: Instantiate GameTracer.jl
         working-directory: GameTracer.jl
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+        run: |
+          julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
       - name: Smoke test patched DLL directly
-        run: >-
-          julia -e 'using Libdl; dll = joinpath(ENV["GITHUB_WORKSPACE"], "prefix", "bin", "libgametracer.dll"); println("DLL = ", dll); h = Libdl.dlopen(dll); println("Direct dlopen ok: ", h !== nothing)'
+        run: |
+          julia -e 'using Libdl; dll = joinpath(ENV["GITHUB_WORKSPACE"], "prefix", "bin", "libgametracer.dll"); println("DLL = ", dll); h = Libdl.dlopen(dll); println("Direct dlopen ok = ", h !== nothing)'
 
       - name: Smoke test package load
         working-directory: GameTracer.jl
-        run: julia --project=. -e 'using GameTracer; println("using GameTracer ok")'
+        run: |
+          julia --project=. -e 'using GameTracer; println("using GameTracer ok")'
 
       - name: Run GameTracer.jl tests
         working-directory: GameTracer.jl
-        run: julia --project=. -e 'using Pkg; Pkg.test()'
+        run: |
+          julia --project=. -e 'using Pkg; Pkg.test()'
